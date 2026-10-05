@@ -17,6 +17,15 @@ jobs:
     steps:
       - name: Trigger mcpmux.com rebuild
         run: |
-          curl -s -X POST "$CF_PAGES_DEPLOY_HOOK"
+          # Without the secret, `curl ""` exits 3 and failed every docs push.
+          # Skip with a visible warning instead — the site then needs a manual
+          # deploy of mcpmux.discover.ui until the hook is configured.
+          if [ -z "$CF_PAGES_DEPLOY_HOOK" ]; then
+            echo "::warning title=mcpmux.com not rebuilt::CF_PAGES_DEPLOY_HOOK secret is not set; skipping the docs rebuild. Deploy mcpmux.discover.ui manually or add the secret."
+            exit 0
+          fi
+          # -f fails on an HTTP error, so a revoked or wrong hook is caught
+          # instead of passing silently.
+          curl -fsS -X POST "$CF_PAGES_DEPLOY_HOOK"
         env:
           CF_PAGES_DEPLOY_HOOK: ${{ secrets.CF_PAGES_DEPLOY_HOOK }}
