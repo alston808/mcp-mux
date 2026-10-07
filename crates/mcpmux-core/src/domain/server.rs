@@ -162,12 +162,18 @@ fn default_input_type() -> String {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuthConfig {
     None,
-    ApiKey { instructions: Option<String> },
-    OptionalApiKey { instructions: Option<String> },
+    ApiKey {
+        instructions: Option<String>,
+    },
+    OptionalApiKey {
+        instructions: Option<String>,
+    },
     /// HTTP Basic authentication (username/password).
     /// The user supplies credentials directly; the transport/inputs carry
     /// them via environment variables or headers.
-    Basic { instructions: Option<String> },
+    Basic {
+        instructions: Option<String>,
+    },
     Oauth,
 }
 
@@ -282,9 +288,8 @@ mod tests {
             }
         }"#;
 
-        let def: ServerDefinition = serde_json::from_str(json).expect(
-            "ServerDefinition with basic auth should deserialize without error",
-        );
+        let def: ServerDefinition = serde_json::from_str(json)
+            .expect("ServerDefinition with basic auth should deserialize without error");
 
         assert!(
             matches!(def.auth, Some(AuthConfig::Basic { .. })),
@@ -293,35 +298,52 @@ mod tests {
         );
     }
 
-    /// Regression test: ensure all recognized auth types round-trip correctly.
+    /// Every auth type survives serialize -> deserialize (the disk cache and
+    /// the frontend both see the serialized form), keeping `instructions`.
     #[test]
-    fn test_all_auth_variants_deserialize() {
-        let cases: &[(&str, &str)] = &[
-            ("none", "None"),
-            ("api_key", "ApiKey"),
-            ("optional_api_key", "OptionalApiKey"),
-            ("basic", "Basic"),
-            ("oauth", "Oauth"),
+    fn test_auth_variants_round_trip() {
+        let cases = [
+            (AuthConfig::None, "none"),
+            (
+                AuthConfig::ApiKey {
+                    instructions: Some("i".into()),
+                },
+                "api_key",
+            ),
+            (
+                AuthConfig::OptionalApiKey {
+                    instructions: Some("i".into()),
+                },
+                "optional_api_key",
+            ),
+            (
+                AuthConfig::Basic {
+                    instructions: Some("i".into()),
+                },
+                "basic",
+            ),
+            (AuthConfig::Oauth, "oauth"),
         ];
-        for (auth_type, variant_name) in cases {
-            let json = format!(
-                r#"{{"id":"s","name":"s","transport":{{"type":"stdio","command":"c"}},"auth":{{"type":"{}","instructions":"i"}}}}"#,
-                auth_type
-            );
-            let def: ServerDefinition = serde_json::from_str(&json)
-                .unwrap_or_else(|e| panic!("failed to parse auth type '{}': {}", auth_type, e));
-            let actual = match &def.auth {
-                Some(AuthConfig::None) => "None",
-                Some(AuthConfig::ApiKey { .. }) => "ApiKey",
-                Some(AuthConfig::OptionalApiKey { .. }) => "OptionalApiKey",
-                Some(AuthConfig::Basic { .. }) => "Basic",
-                Some(AuthConfig::Oauth) => "Oauth",
-                None => "None-Missing",
+        for (auth, tag) in cases {
+            let json = serde_json::to_value(&auth).unwrap();
+            assert_eq!(json["type"], tag);
+
+            let back: AuthConfig = serde_json::from_value(json).unwrap();
+            let instructions = |a: &AuthConfig| match a {
+                AuthConfig::ApiKey { instructions }
+                | AuthConfig::OptionalApiKey { instructions }
+                | AuthConfig::Basic { instructions } => instructions.clone(),
+                AuthConfig::None | AuthConfig::Oauth => None,
             };
             assert_eq!(
-                actual, *variant_name,
-                "auth type '{}' did not deserialize to expected variant",
-                auth_type
+                std::mem::discriminant(&back),
+                std::mem::discriminant(&auth),
+                "{tag} changed variant"
+            );
+            assert_eq!(
+                instructions(&back),
+                instructions(&auth),
+                "{tag} lost instructions"
             );
         }
     }
