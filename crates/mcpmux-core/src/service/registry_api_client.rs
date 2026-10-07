@@ -27,42 +27,68 @@ struct ApiResponse<T> {
 
 /// Complete registry bundle from /v1/bundle
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(from = "RawRegistryBundle")]
 pub struct RegistryBundle {
     pub version: String,
     pub updated_at: String,
-    #[serde(deserialize_with = "deserialize_servers_lenient")]
     pub servers: Vec<ServerDefinition>,
     pub categories: Vec<Category>,
     pub ui: UiConfig,
     pub home: Option<HomeConfig>,
+    /// Servers dropped while parsing because this client couldn't read them.
+    /// Not serialized, so a disk-cached bundle reads back as 0.
+    #[serde(skip)]
+    pub skipped_servers: usize,
 }
 
-/// Deserialize the server list entry by entry, skipping any server that fails
-/// to parse. The registry can publish schema values this client predates (a new
-/// auth type, badge, transport, ...); one such server must not take down
-/// discovery for the whole bundle.
-fn deserialize_servers_lenient<'de, D>(deserializer: D) -> Result<Vec<ServerDefinition>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
-    Ok(raw
-        .into_iter()
-        .filter_map(|value| {
-            let id = value
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<missing id>")
-                .to_string();
-            match serde_json::from_value::<ServerDefinition>(value) {
-                Ok(server) => Some(server),
-                Err(e) => {
-                    tracing::warn!("Skipping registry server '{}': {}", id, e);
-                    None
+/// Wire form of [`RegistryBundle`], with each server left as raw JSON.
+///
+/// Servers are parsed one by one and any that fail are skipped. The registry
+/// can publish schema values this client predates (a new auth type, badge,
+/// transport, ...); one such server must not take down discovery for the
+/// whole bundle.
+#[derive(Deserialize)]
+struct RawRegistryBundle {
+    version: String,
+    updated_at: String,
+    servers: Vec<serde_json::Value>,
+    categories: Vec<Category>,
+    ui: UiConfig,
+    home: Option<HomeConfig>,
+}
+
+impl From<RawRegistryBundle> for RegistryBundle {
+    fn from(raw: RawRegistryBundle) -> Self {
+        let total = raw.servers.len();
+        let servers: Vec<ServerDefinition> = raw
+            .servers
+            .into_iter()
+            .filter_map(|value| {
+                let id = value
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("<missing id>")
+                    .to_string();
+                match serde_json::from_value::<ServerDefinition>(value) {
+                    Ok(server) => Some(server),
+                    Err(e) => {
+                        tracing::warn!("Skipping registry server '{}': {}", id, e);
+                        None
+                    }
                 }
-            }
-        })
-        .collect())
+            })
+            .collect();
+
+        Self {
+            version: raw.version,
+            updated_at: raw.updated_at,
+            skipped_servers: total - servers.len(),
+            servers,
+            categories: raw.categories,
+            ui: raw.ui,
+            home: raw.home,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -288,6 +314,15 @@ mod tests {
 
         let ids: Vec<&str> = bundle.servers.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, ["good"]);
+        assert_eq!(bundle.skipped_servers, 1);
+
+        // The disk cache stores the serialized bundle; the skip count is
+        // runtime-only and must not leak into it.
+        let cached = serde_json::to_value(&bundle).unwrap();
+        assert!(cached.get("skipped_servers").is_none());
+        let reloaded: RegistryBundle = serde_json::from_value(cached).unwrap();
+        assert_eq!(reloaded.servers.len(), 1);
+        assert_eq!(reloaded.skipped_servers, 0);
     }
 
     #[test]
