@@ -164,6 +164,10 @@ pub enum AuthConfig {
     None,
     ApiKey { instructions: Option<String> },
     OptionalApiKey { instructions: Option<String> },
+    /// HTTP Basic authentication (username/password).
+    /// The user supplies credentials directly; the transport/inputs carry
+    /// them via environment variables or headers.
+    Basic { instructions: Option<String> },
     Oauth,
 }
 
@@ -251,4 +255,74 @@ pub struct Media {
     pub screenshots: Vec<String>,
     pub demo_video: Option<String>,
     pub banner: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test: a registry server with `auth.type = "basic"` (e.g.
+    /// Darkmoon) must deserialize instead of failing the entire bundle parse.
+    /// See: registry API returns servers with `auth.type: "basic"` which was
+    /// not a recognized variant of `AuthConfig`, causing
+    /// `Failed to parse registry bundle JSON` and forcing the app offline.
+    #[test]
+    fn test_auth_basic_deserializes() {
+        let json = r#"{
+            "id": "io.github-ascit31-darkmoon-mcp-npx",
+            "name": "Darkmoon (npx)",
+            "description": "Darkmoon MCP server",
+            "transport": {
+                "type": "stdio",
+                "command": "npx"
+            },
+            "auth": {
+                "type": "basic",
+                "instructions": "Use the username and password of a user on your own Darkmoon Pro dashboard."
+            }
+        }"#;
+
+        let def: ServerDefinition = serde_json::from_str(json).expect(
+            "ServerDefinition with basic auth should deserialize without error",
+        );
+
+        assert!(
+            matches!(def.auth, Some(AuthConfig::Basic { .. })),
+            "expected AuthConfig::Basic, got {:?}",
+            def.auth
+        );
+    }
+
+    /// Regression test: ensure all recognized auth types round-trip correctly.
+    #[test]
+    fn test_all_auth_variants_deserialize() {
+        let cases: &[(&str, &str)] = &[
+            ("none", "None"),
+            ("api_key", "ApiKey"),
+            ("optional_api_key", "OptionalApiKey"),
+            ("basic", "Basic"),
+            ("oauth", "Oauth"),
+        ];
+        for (auth_type, variant_name) in cases {
+            let json = format!(
+                r#"{{"id":"s","name":"s","transport":{{"type":"stdio","command":"c"}},"auth":{{"type":"{}","instructions":"i"}}}}"#,
+                auth_type
+            );
+            let def: ServerDefinition = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("failed to parse auth type '{}': {}", auth_type, e));
+            let actual = match &def.auth {
+                Some(AuthConfig::None) => "None",
+                Some(AuthConfig::ApiKey { .. }) => "ApiKey",
+                Some(AuthConfig::OptionalApiKey { .. }) => "OptionalApiKey",
+                Some(AuthConfig::Basic { .. }) => "Basic",
+                Some(AuthConfig::Oauth) => "Oauth",
+                None => "None-Missing",
+            };
+            assert_eq!(
+                actual, *variant_name,
+                "auth type '{}' did not deserialize to expected variant",
+                auth_type
+            );
+        }
+    }
 }
